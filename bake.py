@@ -9,6 +9,7 @@ Examples:
     tools/speedtree_baker/bake.py --force
     tools/speedtree_baker/bake.py --verify
     tools/speedtree_baker/bake.py --dry-run --pattern 'bin/pack/**/*.spt'
+    tools/speedtree_baker/bake.py --force --manifest treecache/MANIFEST.json
 """
 
 from __future__ import annotations
@@ -74,6 +75,50 @@ def write_stamp(path: Path, data: dict) -> None:
         json.dump(data, handle, indent=2, sort_keys=True)
         handle.write("\n")
     os.replace(temp, path)
+
+
+def write_manifest(path: Path, root: Path, out_dir: Path,
+                   entries: dict[int, Path], dumper: Path, dumper_hash: str | None,
+                   dll: Path, seed: int, patterns: list[str],
+                   duplicate_count: int, manifest_prefix: Path | None) -> None:
+    """Write the cache manifest consumed by the devkit's verify-treecache.py."""
+    prefix = (root / manifest_prefix).resolve() if manifest_prefix else root
+    records = []
+    for digest, spt in sorted(entries.items(), key=lambda item: str(item[1])):
+        tree = out_dir / tree_name(digest)
+        try:
+            relative = spt.resolve().relative_to(prefix)
+        except ValueError:
+            relative = spt.resolve().relative_to(root)
+        records.append({
+            "spt": relative.as_posix(),
+            "file": tree.name,
+            "fnv1a32": f"{digest:08x}",
+            "spt_bytes": spt.stat().st_size,
+            "bytes": tree.stat().st_size,
+            "sha256": sha256_file(tree),
+        })
+    manifest = {
+        "format": FORMAT_VERSION,
+        "generator": {
+            "tool": "open-mt2/speedtreebkr",
+            "tool_version": TOOL_VERSION,
+            "tree_format": FORMAT_VERSION,
+            "seed": seed,
+            "dumper": dumper.name,
+            "dumper_sha256": dumper_hash,
+            "dll_sha256": sha256_file(dll) if dll.is_file() else None,
+            "baked_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        },
+        "source": {
+            "patterns": patterns,
+            "assets": len(records),
+            "duplicate_assets": duplicate_count,
+        },
+        "entries": records,
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    write_stamp(path, manifest)
 
 
 def collect_spt(root: Path, patterns: list[str]) -> list[Path]:
@@ -148,6 +193,13 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
                         help="delete generated .tree files before baking")
     parser.add_argument("--verify", action="store_true",
                         help="only verify existing cache entries, do not bake")
+    parser.add_argument("--manifest", type=Path, default=None, metavar="FILE",
+                        help="write a JSON cache manifest (asset paths, hashes, "
+                             "generator provenance) after baking")
+    parser.add_argument("--manifest-prefix", type=Path, default=Path("bin/pack"),
+                        metavar="DIR",
+                        help="strip this directory from --manifest asset paths "
+                             "(default: bin/pack)")
     parser.add_argument("--dry-run", action="store_true",
                         help="print what would be baked and exit")
     parser.add_argument("-v", "--verbose", action="store_true",
@@ -366,6 +418,12 @@ def main(argv: list[str]) -> int:
         "assets": len(entries),
         "baked_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     })
+
+    if args.manifest:
+        write_manifest(args.manifest, root, out_dir, entries, dumper, tool_hash,
+                       dll, args.seed, patterns, duplicate_count,
+                       args.manifest_prefix)
+        note(f"manifest: {args.manifest}")
 
     note(f"cache ready: {len(entries)} assets in {out_dir}")
     return 0
